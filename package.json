@@ -1,20 +1,19 @@
 {
   "name": "latex-super-converter",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Convert and repair LaTeX delimiters, auto-detect bare formulas, and preserve Markdown structure.",
   "main": "main.js",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --platform=node --target=es2018 --outfile=main.js",
-    "dev": "npm run build -- --watch",
-    "test": "node test/converter.test.js",
-    "typecheck": "tsc --noEmit"
+    "build": "node scripts/build.js",
+    "test": "node test/converter.test.js && node test/bare.test.js && node test/pipeline.test.js && node test/plugin.test.js",
+    "verify": "npm run build && git diff --exit-code -- main.js"
   },
   "keywords": [
     "obsidian",
     "latex",
     "mathjax"
   ],
-  "author": "YG",
+  "author": "fqm1149",
   "license": "MIT",
   "devDependencies": {}
 }

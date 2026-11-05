@@ -1,0 +1,83 @@
+name: Release
+
+# 由 GitHub Actions 从源码构建 main.js 并签名，
+# 这样用户可以用 `gh attestation verify` 验证 release 里的 main.js
+# 确实来自本仓库的这次提交，而不是手工上传的二进制。
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建并发布的 tag（需已存在）"
+        required: true
+
+permissions:
+  contents: write      # 创建/更新 release
+  id-token: write      # 生成 provenance 签名
+  attestations: write  # 写入 artifact attestation
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install (lockfile is empty, this only validates it)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Verify manifest version matches tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          MANIFEST_VERSION=$(node -p "require('./manifest.json').version")
+          if [ "$TAG" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag '$TAG' does not match manifest.json version '$MANIFEST_VERSION'"
+            exit 1
+          fi
+          echo "Version OK: $MANIFEST_VERSION"
+
+      - name: Build main.js
+        run: npm run build
+
+      - name: Verify build is reproducible
+        run: |
+          # 同一份源码两次构建必须字节一致，否则说明构建引入了不确定性
+          shasum -a 256 main.js > /tmp/first.sha
+          npm run build
+          shasum -a 256 main.js > /tmp/second.sha
+          diff /tmp/first.sha /tmp/second.sha || {
+            echo "::error::Build is not reproducible — main.js changed between two builds"
+            exit 1
+          }
+          cat /tmp/first.sha
+
+      - name: Run tests
+        run: npm test
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" main.js manifest.json --clobber
+          else
+            gh release create "$TAG" main.js manifest.json \
+              --title "$TAG" \
+              --notes "Built and attested by GitHub Actions from commit ${GITHUB_SHA}."
+          fi

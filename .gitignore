@@ -1,11 +1,5 @@
 # 依赖
 node_modules/
-package-lock.json
-pnpm-lock.yaml
-
-# 构建产物（发布时作为 release 附件上传，不提交源码树）
-# main.js 需要提交到仓库！Obsidian 从 release 下载，但源码审阅也看仓库
-# 若不想提交 main.js，请确保每次 release 都上传
 
 # 系统与编辑器
 .DS_Store
@@ -15,6 +9,6 @@ Thumbs.db
 *.swp
 *~
 
-# 本地测试产物
+# 本地临时产物
 /tmp/
 *.log
