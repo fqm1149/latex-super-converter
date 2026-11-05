@@ -1,0 +1,10 @@
+{
+  "id": "latex-super-converter",
+  "name": "LaTeX Super Converter",
+  "version": "1.2.0",
+  "minAppVersion": "1.0.0",
+  "description": "Convert \\( \\) and \\[ \\] LaTeX delimiters to Obsidian-compatible $ and $$, and auto-detect bare LaTeX formulas that have no delimiters at all. Tables, bold, code, and links are fully preserved.",
+  "author": "fqm1149",
+  "authorUrl": "https://github.com/fqm1149",
+  "isDesktopOnly": false
+}
