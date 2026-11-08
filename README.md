@@ -99,6 +99,11 @@ cd latex-super-converter
 | `n_7 \in \{1, 8, 48\}` | `$n_7 \in \{1, 8, 48\}$` |
 | `\langle r, s \mid r^4 = e \rangle` | `$\langle r, s \mid r^4 = e \rangle$` |
 | `p \nmid \binom{p^a m}{p^a}` | `$p \nmid \binom{p^a m}{p^a}$` |
+| `\{x_k\}_{k=1}^\infty` | `$\{x_k\}_{k=1}^\infty$` |
+| `\left[ \frac{y^2}{2} \right]_{-1}^1 = 0` | `$\left[ \frac{y^2}{2} \right]_{-1}^1 = 0$` |
+| `\frac{x^2 - y^2}{(x^2 + y^2)^2}` | `$\frac{x^2 - y^2}{(x^2 + y^2)^2}$` |
+| `\begin{cases} 1, & x > 0 \\ -1, & x < 0 \end{cases}` | `$\begin{cases} 1, & x > 0 \\ -1, & x < 0 \end{cases}$`（`&` 与 `\\` 不断开） |
+| `D = [a, b] \times [c, +\infty)` | `$D = [a, b] \times [c, +\infty)$`（半开区间） |
 
 ### 不会误伤的内容
 
@@ -210,11 +215,15 @@ $$
 ## 开发
 
 ```bash
-node test/converter.test.js   # 32 个分隔符用例
-node test/bare.test.js        # 232 个裸公式用例（含 Markdown 结构保护与 example.md 回归）
+node test/converter.test.js   # 38 个分隔符用例
+node test/bare.test.js        # 630 个裸公式用例（含 Markdown 结构保护、example/example2 回归）
+node test/pipeline.test.js    # 1196 个端到端用例（真实仓库 21 篇笔记审计）
 node test/plugin.test.js      # mock obsidian 加载 main.js 冒烟测试
 node scripts/build.js         # 生成 main.js
 ```
+
+回归样本放在 `test/fixtures/`，`example2.md` 覆盖了 `\{ \}` 上下标链、`\left[ \right]` 混搭定界符、
+`\frac` 嵌套参数、`cases` 环境内的 `&` / `\\`、半开区间 `[c, +\infty)` 这类曾经断裂的写法。
 
 `main.js` 由 `scripts/build.js` 拼接 `src/converter.js` + `src/bare.js` + `src/plugin.js` 生成，零依赖，不需要 `npm install`。
 
@@ -232,6 +241,9 @@ latex-super-converter/
 ├── test/
 │   ├── converter.test.js
 │   ├── bare.test.js
-│   └── plugin.test.js
+│   ├── pipeline.test.js
+│   ├── plugin.test.js
+│   └── fixtures/         # 回归样本（example2.md 等）
+│       └── example2.md
 └── install.sh
 ```

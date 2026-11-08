@@ -247,4 +247,121 @@ if (fs.existsSync(examplePath)) {
   }
 }
 
+/* ---------------- 9. 结构性断裂回归（example2.md 系列） ---------------- */
+
+// 9.1 \{x_k\}_{k=1}^\infty —— 转义花括号 + 上下标链必须整体成段
+eq(
+  c("设 \\{x_k\\}_{k=1}^\\infty 为 [0,1] 内的序列"),
+  "设 $\\{x_k\\}_{k=1}^\\infty$ 为 [0,1] 内的序列",
+  "escaped brace with script chain"
+);
+eq(c("序列 \\{a_n\\}_{n=1}^\\infty 收敛"), "序列 $\\{a_n\\}_{n=1}^\\infty$ 收敛", "brace script n");
+
+// 9.2 \left[ … \right] 与普通 [ … ] 必须用同一套配对
+eq(
+  c("于是 \\left[ \\frac{y^2}{2} \\right]_{-1}^1 = 0 成立"),
+  "于是 $\\left[ \\frac{y^2}{2} \\right]_{-1}^1 = 0$ 成立",
+  "left-bracket right-bracket with scripts"
+);
+eq(
+  c("极限 \\left( \\frac{1}{n} \\right)_{n=1}^\\infty 为零"),
+  "极限 $\\left( \\frac{1}{n} \\right)_{n=1}^\\infty$ 为零",
+  "left-paren right-paren with scripts"
+);
+eq(
+  c("集合 \\left\\{ \\frac{a}{b} \\right\\} 有限"),
+  "集合 $\\left\\{ \\frac{a}{b} \\right\\}$ 有限",
+  "left-brace right-brace"
+);
+
+// 9.3 \frac 的多组参数必须整体归入命令 token
+eq(
+  c("被积函数 f(x,y) = \\frac{x^2 - y^2}{(x^2 + y^2)^2}："),
+  "被积函数 $f(x,y) = \\frac{x^2 - y^2}{(x^2 + y^2)^2}$：",
+  "frac with nested paren group"
+);
+eq(
+  c("化简 \\frac{\\frac{a}{b}}{\\frac{c}{d}} 即可"),
+  "化简 $\\frac{\\frac{a}{b}}{\\frac{c}{d}}$ 即可",
+  "nested frac"
+);
+eq(
+  c("取 \\sqrt[3]{\\frac{a}{b}} 的值"),
+  "取 $\\sqrt[3]{\\frac{a}{b}}$ 的值",
+  "sqrt with optional arg"
+);
+
+// 9.4 \begin{cases} … \end{cases} 内部 & 与 \\ 不得断开
+eq(
+  c("f(x,y) = \\begin{cases} \\frac{1}{k}, & x = x_k \\\\ 0, & \\text{其他} \\end{cases}"),
+  "$f(x,y) = \\begin{cases} \\frac{1}{k}, & x = x_k \\\\ 0, & \\text{其他} \\end{cases}$",
+  "cases env amp and newline"
+);
+eq(
+  c("g(x) = \\begin{cases} 1, & x > 0 \\\\ -1, & x < 0 \\end{cases} 是符号函数"),
+  "$g(x) = \\begin{cases} 1, & x > 0 \\\\ -1, & x < 0 \\end{cases}$ 是符号函数",
+  "cases env followed by prose"
+);
+eq(
+  c("矩阵 A = \\begin{pmatrix} 1 & 0 \\\\ 0 & 1 \\end{pmatrix} 可逆"),
+  "矩阵 $A = \\begin{pmatrix} 1 & 0 \\\\ 0 & 1 \\end{pmatrix}$ 可逆",
+  "pmatrix env"
+);
+
+// 9.5 半开区间 [c, +\infty) —— 混搭括号宽容配对
+eq(
+  c("在 D = [a, b] \\times [c, +\\infty) 上"),
+  "在 $D = [a, b] \\times [c, +\\infty)$ 上",
+  "half-open interval"
+);
+// 纯区间没有 LaTeX 命令作证据，保守起见不动（避免误伤 "[1, 2) 节" 这类普通文字）
+eq(
+  c("区间 [0, 1) 与 (0, 1] 都算"),
+  "区间 [0, 1) 与 (0, 1] 都算",
+  "bare interval without evidence untouched"
+);
+
+// 9.6 反例函数里的 D(y) 单独成段
+eq(
+  c("内层函数 f(x_k, y) = \\frac{1}{k} D(y)（其中 D(y) 为狄利克雷函数）"),
+  "内层函数 $f(x_k, y) = \\frac{1}{k} D(y)$（其中 $D(y)$ 为狄利克雷函数）",
+  "nested function refs"
+);
+
+// 9.7 行内公式不得吞掉后面的中文
+eq(
+  c("且二重积分 \\iint_D f(x,y) \\mathrm{d}\\sigma = 0。 然而"),
+  "且二重积分 $\\iint_D f(x,y) \\mathrm{d}\\sigma = 0$。 然而",
+  "span stops before chinese"
+);
+
+/* ---------------- 10. example2.md 全文属性回归 ---------------- */
+
+{
+  const file = path.join(__dirname, "fixtures", "example2.md");
+  if (fs.existsSync(file)) {
+    const before = fs.readFileSync(file, "utf8").split("\n");
+    const after = c(before.join("\n")).split("\n");
+    assert.strictEqual(after.length, before.length, "line count changed on example2.md");
+    pass++;
+
+    const dollars = (s) => (s.match(/(?<!\\)\$/g) || []).length;
+    for (let i = 0; i < after.length; i++) {
+      assert.strictEqual(dollars(after[i]) % 2, 0, `unbalanced $ on example2.md line ${i + 1}`);
+      pass++;
+    }
+    // 竖线与加粗必须原样保留
+    for (let i = 0; i < before.length; i++) {
+      const pipes = (s) => (s.match(/(?<!\\)\|/g) || []).length;
+      assert.strictEqual(pipes(after[i]), pipes(before[i]), `pipes changed on line ${i + 1}`);
+      assert.strictEqual((after[i].match(/\*\*/g) || []).length, (before[i].match(/\*\*/g) || []).length,
+        `bold changed on line ${i + 1}`);
+      pass += 2;
+    }
+    // 幂等
+    assert.strictEqual(c(after.join("\n")), after.join("\n"), "example2.md not idempotent");
+    pass++;
+  }
+}
+
 console.log(`✅ ${pass} bare-formula tests passed`);

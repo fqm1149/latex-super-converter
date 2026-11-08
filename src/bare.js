@@ -84,18 +84,87 @@ const TEXT_CMDS = new Set([
 const STRONG_OPS = new Set(["=", "<", ">", "+", "-", "*", "/"]);
 const WEAK_OPS = new Set([",", ";", ":", "!", "'", '"']);
 
+/**
+ * 定界符规范化：把 \( \[ \{ \langle \left[ \left\{ … 一律映射到同一个「规范键」，
+ * 这样 \left[ … \right] 才能和普通 [ … ] 用同一张配对表匹配。
+ */
+const DELIM_CANON = {
+  "(": "(", ")": ")", "[": "[", "]": "]", "{": "{", "}": "}", "|": "|", ".": ".",
+  "\\{": "{", "\\}": "}", "\\[": "[", "\\]": "]",
+  "\\langle": "\\langle", "\\rangle": "\\rangle",
+  "\\lbrace": "{", "\\rbrace": "}",
+  "\\lbrack": "[", "\\rbrack": "]",
+  "\\lvert": "|", "\\rvert": "|",
+  "\\vert": "|", "\\Vert": "|",
+  "\\lVert": "|", "\\rVert": "|",
+  "\\lfloor": "\\lfloor", "\\rfloor": "\\rfloor",
+  "\\lceil": "\\lceil", "\\rceil": "\\rceil",
+};
+
 const PAIR = {
   "|": "|",
   "(": ")",
   "[": "]",
   "{": "}",
-  "\\{": "\\}",
-  "\\[": "\\]",
+  ".": ".",
   "\\langle": "\\rangle",
-  "\\lbrace": "\\rbrace",
-  "\\lbrack": "\\rbrack",
-  "\\left": "\\right",
+  "\\lfloor": "\\rfloor",
+  "\\lceil": "\\rceil",
 };
+
+/** 命令名形态的左定界符（不含反斜杠） */
+const OPEN_DELIMS = new Set([
+  "langle", "lbrace", "lbrack", "lfloor", "lceil", "lvert", "lVert",
+]);
+/** 二字符转义形态的左定界符 */
+const OPEN_DELIMS_TWO = new Set(["\\{", "\\["]);
+
+/**
+ * 规范键里「可以当作括号」的那些（开件与闭件都算）。
+ * 半开区间 [c, +\infty)、\left(0,1\right] 这类混搭写法靠它做宽容配对。
+ */
+const BRACKET_KEYS = new Set([
+  "(", ")", "[", "]", "{", "}",
+  "\\langle", "\\rangle", "\\lfloor", "\\rfloor", "\\lceil", "\\rceil",
+]);
+
+function isBracketKey(key) {
+  return BRACKET_KEYS.has(key);
+}
+
+/** i 指向 '['，返回配对 ']' 之后的下标；用于 \sqrt[3]{x} */
+function matchSquare(line, i) {
+  let depth = 0;
+  let j = i;
+  while (j < line.length) {
+    const c = line[j];
+    if (c === "\\") {
+      j += 2;
+      continue;
+    }
+    if (c === "[") depth++;
+    else if (c === "]") {
+      depth--;
+      if (depth === 0) return j + 1;
+    }
+    j++;
+  }
+  return -1;
+}
+
+/**
+ * 连续吃掉多个 {…} 参数的命令。
+ * \frac{a}{b} 的第二个参数、\overset{a}{b} 的第二个参数都必须归到命令 token 里，
+ * 否则 {…} 会变成独立括号，把 \frac 的分子分母切成两段。
+ */
+const MULTI_ARG_CMDS = new Set([
+  ...TEXT_CMDS,
+  "frac", "dfrac", "tfrac", "cfrac", "binom", "dbinom", "tbinom",
+  "overset", "underset", "sqrt", "genfrac", "stackrel",
+]);
+
+/** 带可选 [..] 参数的命令：\sqrt[3]{x} */
+const OPT_ARG_CMDS = new Set(["sqrt", "genfrac"]);
 
 /* ------------------------------------------------------------------ */
 /* 分词                                                                */
@@ -131,6 +200,10 @@ function readScripts(line, j) {
       const ge = readGroup(line, k);
       if (ge < 0) return { end: k, hasScript };
       k = ge;
+    } else if (line[k] === "\\") {
+      // ^\infty / _\alpha：整个命令是上下标的原子，不能只吃反斜杠
+      const m = /^\\[A-Za-z]+/.exec(line.slice(k));
+      k += m ? m[0].length : 2;
     } else if (k < line.length) {
       k++;
     }
@@ -313,30 +386,73 @@ function tokenize(line, opts = {}) {
       if (m) {
         const name = m[1];
         let end = i + m[0].length;
-        if (TEXT_CMDS.has(name) && line[end] === "{") {
+
+        // 1) 吃参数：MULTI_ARG_CMDS 循环吃 {…}，OPT_ARG_CMDS 先把 [..] 也吃掉
+        if (OPT_ARG_CMDS.has(name) && line[end] === "[") {
+          const close = matchSquare(line, end);
+          if (close > 0) end = close;
+        }
+        if (MULTI_ARG_CMDS.has(name)) {
+          let guard = 0;
+          while (line[end] === "{" && guard++ < 4) {
+            const ge = readGroup(line, end);
+            if (ge < 0) break;
+            end = ge;
+          }
+        } else if (TEXT_CMDS.has(name) && line[end] === "{") {
           const ge = readGroup(line, end);
           if (ge > 0) end = ge;
         }
-        // \text{Syl}_p 这种：命令后面还挂上下标
-        const csc = readScripts(line, end);
+
+        // 2) \left[ / \right( 这类：命令与紧随其后的定界符是同一条 token
         let kind = KNOWN_CMDS.has(name) ? "cmd" : "cmdx";
-        if (name === "langle" || name === "lbrace" || name === "lbrack" || name === "left") {
-          kind = "open";
-        } else if (name === "rangle" || name === "rbrace" || name === "rbrack" || name === "right") {
-          kind = "close";
+        let canon = null;
+        if (name === "left" || name === "right") {
+          const rest = line.slice(end);
+          const dm = /^(\\(?:[A-Za-z]+)|\\.|[()[\]{}|./])/.exec(rest);
+          if (dm) {
+            end += dm[0].length;
+            canon = DELIM_CANON[dm[1]] || null;
+          }
+          kind = name === "left" ? "open" : "close";
+        } else if (DELIM_CANON["\\" + name] !== undefined) {
+          canon = DELIM_CANON["\\" + name];
+          kind = OPEN_DELIMS.has(name) ? "open" : "close";
         }
-        push(kind, i, csc.end, { name, hasScript: csc.hasScript });
+
+        // 3) \text{Syl}_p / \}_{k=1}^\infty 这种：命令后面还挂上下标
+        const csc = readScripts(line, end);
+
+        // 4) \begin{cases} / \end{cases}：环境边界 token，成对闭合
+        if (name === "begin" || name === "end") {
+          const gm = /^\{([A-Za-z*]+)\}/.exec(line.slice(i + m[0].length));
+          if (gm && MATH_ENVS.has(gm[1])) {
+            push(name === "begin" ? "envopen" : "envclose", i, end, {
+              name2: gm[1],
+              hasScript: false,
+            });
+            i = end;
+            continue;
+          }
+        }
+
+        push(kind, i, csc.end, { name, hasScript: csc.hasScript, canon });
         i = csc.end;
         continue;
       }
       const two = line.slice(i, i + 2);
-      if (two === "\\{" || two === "\\[" || two === "\\langle") {
-        push("open", i, i + 2, { name: two });
-      } else if (two === "\\}" || two === "\\]" || two === "\\rangle") {
-        push("close", i, i + 2, { name: two });
-      } else {
-        push("esc", i, i + 2, { name: two });
+      if (DELIM_CANON[two] !== undefined) {
+        const kind = OPEN_DELIMS_TWO.has(two) ? "open" : "close";
+        const csc = readScripts(line, i + 2);
+        push(kind, i, csc.end, {
+          name: two,
+          canon: DELIM_CANON[two],
+          hasScript: csc.hasScript,
+        });
+        i = csc.end;
+        continue;
       }
+      push("esc", i, i + 2, { name: two });
       i += 2;
       continue;
     }
@@ -428,6 +544,12 @@ function tokenize(line, opts = {}) {
       i++;
       continue;
     }
+    // 环境内部分隔符：& （列分隔）、\\ （换行，已在 esc 分支）
+    if (c === "&") {
+      push("amp", i, i + 1);
+      i++;
+      continue;
+    }
 
     push("other", i, i + 1);
     i++;
@@ -506,13 +628,13 @@ function hasLocalEvidence(toks, i, level) {
   return false;
 }
 
-const BRACKET_STARTS = new Set(["(", "[", "\\{", "\\langle", "\\lbrace", "\\lbrack", "\\left"]);
+const BRACKET_STARTS = new Set(["(", "[", "{", "|", "\\langle", "\\lfloor", "\\lceil"]);
 
 function canStart(toks, i, level) {
   const tk = toks[i];
   if (!tk) return false;
-  if (tk.t === "cmd" || tk.t === "esc" || tk.t === "pipe") return true;
-  if (tk.t === "open") return level >= 2 && BRACKET_STARTS.has(tk.text);
+  if (tk.t === "cmd" || tk.t === "esc" || tk.t === "pipe" || tk.t === "envopen") return true;
+  if (tk.t === "open") return level >= 2 && BRACKET_STARTS.has(tk.canon || tk.text);
   if (tk.t === "word" || tk.t === "num") return hasLocalEvidence(toks, i, level);
   return false;
 }
@@ -523,7 +645,7 @@ function canStart(toks, i, level) {
 
 /**
  * 从 i 出发向两侧生长，返回 { left, right, pending }。
- * pending > 0 表示还有未闭合的括号 —— 该区间作废。
+ * pending > 0 表示还有未闭合的括号/环境 —— 该区间作废。
  */
 function grow(toks, i, level) {
   const stack = [];
@@ -536,22 +658,72 @@ function grow(toks, i, level) {
     const tk = toks[p];
     if (tk.t === "open") {
       left = p;
-      stack.push(tk.text);
+      stack.push(tk.canon || tk.text);
       break;
     }
     // level 1 只允许向左吸收命令 / 竖线 / 运算符，保持“保守”
     const leftOk =
       tk.t === "sop" || tk.t === "wop" || tk.t === "cmd" || tk.t === "esc" ||
-      tk.t === "pipe" ||
+      tk.t === "pipe" || tk.t === "amp" ||
       (level >= 2 && (tk.t === "num" || isShortWord(tk)));
     if (!leftOk) break;
     left = p;
   }
 
+  /** 当前是否在 \begin{…} 环境内部（cases / aligned / matrix …） */
+  const inEnv = () => stack.some((k) => k.startsWith("env:"));
+
   let j = i;
   let right = i;
   while (j < toks.length) {
     const tk = toks[j];
+
+    // ---- 环境边界 ----
+    if (tk.t === "envopen") {
+      stack.push("env:" + tk.name2);
+      right = j;
+      j++;
+      continue;
+    }
+    if (tk.t === "envclose") {
+      const key = "env:" + tk.name2;
+      const at = stack.lastIndexOf(key);
+      if (at >= 0) {
+        stack.splice(at, 1);
+        right = j;
+        j++;
+        continue;
+      }
+      // 不配对的 \end：退出该区间
+      break;
+    }
+
+    // 环境内部：一切都可以继续（& 列分隔、\\ 换行、任意标识符与数字）
+    if (inEnv()) {
+      if (tk.t === "amp" || tk.t === "esc" || tk.t === "sop" || tk.t === "wop" ||
+          tk.t === "word" || tk.t === "num" || tk.t === "space" ||
+          tk.t === "cmd" || tk.t === "cmdx" || tk.t === "pipe") {
+        right = j;
+        j++;
+        continue;
+      }
+      const key = tk.canon || tk.text;
+      if (tk.t === "open") {
+        stack.push(key);
+        right = j;
+        j++;
+        continue;
+      }
+      if (tk.t === "close") {
+        const top = stack[stack.length - 1];
+        if (top && PAIR[top] === key) stack.pop();
+        right = j;
+        j++;
+        continue;
+      }
+      break;
+    }
+
     // 竖线成对：第一个是开，第二个是闭
     if (tk.t === "pipe") {
       if (stack[stack.length - 1] === "|") {
@@ -564,25 +736,24 @@ function grow(toks, i, level) {
       continue;
     }
     if (tk.t === "open") {
-      stack.push(tk.text);
+      stack.push(tk.canon || tk.text);
       right = j;
       j++;
       continue;
     }
     if (tk.t === "close") {
       const top = stack[stack.length - 1];
-      if (top && PAIR[top] === tk.text) {
+      const key = tk.canon || tk.text;
+      if (!stack.length) break;
+      if (top && PAIR[top] === key) {
         stack.pop();
-        right = j;
-        j++;
-        continue;
+      } else if (top && top !== "|" && isBracketKey(top) && isBracketKey(key)) {
+        // 宽容配对：半开区间写法 [c, +\infty)、\left(0,1\right] 这类混搭括号
+        stack.pop();
       }
-      if (stack.length) {
-        right = j;
-        j++;
-        continue;
-      }
-      break;
+      right = j;
+      j++;
+      continue;
     }
     if (tk.t === "space") {
       const n = nextNonSpace(toks, j);
@@ -590,8 +761,9 @@ function grow(toks, i, level) {
       const nt = toks[n];
       const insideParen = stack.length > 0;
       const ok =
-        nt.t === "cmd" || nt.t === "esc" || nt.t === "pipe" || nt.t === "sop" ||
-        nt.t === "wop" || nt.t === "open" ||
+        nt.t === "cmd" || nt.t === "cmdx" || nt.t === "esc" || nt.t === "pipe" ||
+        nt.t === "sop" || nt.t === "wop" || nt.t === "open" || nt.t === "amp" ||
+        nt.t === "envopen" ||
         (nt.t === "word" && (nt.hasScript || (insideParen && nt.word.length <= 8))) ||
         (isShortWord(nt) && isMathTok(toks, n, level)) ||
         (nt.t === "num" &&
@@ -607,7 +779,7 @@ function grow(toks, i, level) {
       const continues =
         stack.length > 0 ||
         (ntk &&
-          (ntk.t === "cmd" || ntk.t === "pipe" || ntk.t === "sop" ||
+          (ntk.t === "cmd" || ntk.t === "cmdx" || ntk.t === "pipe" || ntk.t === "sop" ||
             (ntk.t === "word" && (ntk.hasScript || ntk.word.length <= 3)) ||
             (ntk.t === "num" && ntk.hasScript)));
       if (continues) {
