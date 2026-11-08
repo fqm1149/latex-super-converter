@@ -1,7 +1,7 @@
 {
   "id": "latex-super-converter",
   "name": "LaTeX Super Converter",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "minAppVersion": "1.0.0",
   "description": "Convert \\( \\) and \\[ \\] LaTeX delimiters to $ and $$ math, and auto-detect bare LaTeX formulas that have no delimiters at all. Tables, bold, code, and links are fully preserved.",
   "author": "fqm1149",

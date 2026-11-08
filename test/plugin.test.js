@@ -315,6 +315,126 @@ const PluginClass = require(path.join(__dirname, "..", "main.js"));
     "no raw heading elements (Obsidian guideline)"
   );
 
+  /* ---------------------------------------------------------------- */
+  /* 安全网：校验不通过时必须「拒绝写入」，原文一字不改                    */
+  /* ---------------------------------------------------------------- */
+
+  const guardEditor = makeEditor("行内 \\(a+b\\) 结束");
+  plugin.app.workspace.getActiveViewOfType = () =>
+    new MarkdownView(guardEditor, Object.assign(new TFile(), {
+      path: "notes/guard.md",
+      basename: "guard",
+      extension: "md",
+    }));
+
+  // 用一个必定失败的 issue 列表，验证「拦截」这条路径本身
+  const originalVerify = plugin.verify;
+  plugin.verify = () => [{ code: "empty-script", line: 1 }];
+  notices.length = 0;
+  plugin.settings.integrityCheck = true;
+  plugin.convertEditor(guardEditor, {});
+  assert.strictEqual(guardEditor.getValue(), "行内 \\(a+b\\) 结束", "blocked conversion must not write");
+  assert.ok(
+    notices.some((m) => /integrity|完整性|empty-script/.test(m)),
+    "blocked conversion must notify: " + JSON.stringify(notices)
+  );
+  pass++;
+
+  // 关闭安全检查后应当照常写入
+  plugin.verify = originalVerify;
+  plugin.settings.integrityCheck = false;
+  guardEditor.setValue("行内 \\(a+b\\) 结束");
+  plugin.convertEditor(guardEditor, {});
+  assert.strictEqual(guardEditor.getValue(), "行内 $a+b$ 结束", "with safety off the write goes through");
+  pass++;
+
+  // 重新打开后，正常内容的转换不受影响
+  plugin.settings.integrityCheck = true;
+  guardEditor.setValue("行内 \\(a+b\\) 结束");
+  plugin.convertEditor(guardEditor, {});
+  assert.strictEqual(guardEditor.getValue(), "行内 $a+b$ 结束", "clean conversion passes the gate");
+  pass++;
+
+  // convertFile 也要被拦（磁盘路径）
+  const blockedFile = Object.assign(new TFile(), {
+    path: "notes/blocked.md",
+    basename: "blocked",
+    extension: "md",
+  });
+  let wrote = false;
+  plugin.app.vault.read = async () => "行内 \\(a+b\\) 结束";
+  plugin.app.vault.modify = async () => {
+    wrote = true;
+  };
+  plugin.verify = () => [{ code: "odd-dollar", line: 2 }];
+  const blockedResult = await plugin.convertFile(blockedFile, {});
+  assert.strictEqual(wrote, false, "vault.modify must not be called when blocked");
+  assert.strictEqual(blockedResult.changed, false);
+  assert.strictEqual(blockedResult.blocked, true);
+  plugin.verify = originalVerify;
+  pass++;
+
+  /* ---------------------------------------------------------------- */
+  /* 语言切换                                                          */
+  /* ---------------------------------------------------------------- */
+
+  assert.strictEqual(typeof plugin.t, "function", "translator installed");
+  // Node 环境里 navigator.language 是 en-US，所以 "auto" 会落到英文；
+  // 这里显式指定 zh 再切 en，验证切换逻辑本身。
+  plugin.settings.language = "zh";
+  plugin.refreshTranslator();
+  const zhName = plugin.t("settings.language.name");
+  plugin.settings.language = "en";
+  plugin.refreshTranslator();
+  const enName = plugin.t("settings.language.name");
+  assert.notStrictEqual(zhName, enName, "language switch changes strings");
+  assert.strictEqual(enName, "Interface language");
+  assert.strictEqual(plugin.t("settings.language.en"), "English");
+  pass++;
+
+  // 英文状态下参数插值正常
+  const enSummary = plugin.summary("notice.prefix.done", {
+    inlineCount: 2,
+    displayCount: 1,
+    bareInline: 3,
+    bareDisplay: 0,
+    skipped: 0,
+  });
+  assert.ok(/^Converted: 2 inline \/ 1 display delimiters, 3 bare formulas$/.test(enSummary), enSummary);
+  pass++;
+
+  // 切回中文
+  plugin.settings.language = "zh";
+  plugin.refreshTranslator();
+  assert.strictEqual(plugin.t("settings.language.name"), "界面语言");
+  pass++;
+
+  // 未知 key 回退成 key 本身，方便早期发现漏翻译
+  assert.strictEqual(plugin.t("no.such.key"), "no.such.key");
+  pass++;
+
+  // 设置面板包含语言下拉，且三个选项齐全
+  registered.dropdowns.length = 0;
+  settingInstances.length = 0;
+  tab.display();
+  const langOptions = registered.dropdowns.find((opts) =>
+    opts.some((o) => o[0] === "auto")
+  );
+  assert.ok(langOptions, "language dropdown rendered");
+  assert.deepStrictEqual(
+    langOptions.map((o) => o[0]),
+    ["auto", "zh", "en"],
+    "language dropdown has auto/zh/en"
+  );
+  pass++;
+
+  // 安全检查开关必须出现在设置面板里
+  assert.ok(
+    settingInstances.length >= 7,
+    "settings tab renders all settings incl. safety & language, got " + settingInstances.length
+  );
+  pass++;
+
   console.log("✅ plugin smoke test passed");
   console.log("   notices:", notices.slice(0, 3).join(" | "));
 })();

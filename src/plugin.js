@@ -9,6 +9,28 @@ const {
   TFile,
 } = require("obsidian");
 
+/*
+ * 打包成 main.js 之后，integrity.js / i18n.js 的内容已经拼进同一个作用域，
+ * 它们的函数是提升的函数声明，直接可见。单独跑源码（测试）时则回退到 require。
+ * 用 typeof 做判据：对未声明的标识符 typeof 不抛错，所以两种模式都能工作。
+ */
+const _checkIntegrity =
+  typeof checkIntegrity === "function"
+    ? checkIntegrity
+    : require("./integrity.js").checkIntegrity;
+const _summarizeIssues =
+  typeof summarizeIssues === "function"
+    ? summarizeIssues
+    : require("./integrity.js").summarizeIssues;
+const _createTranslator =
+  typeof createTranslator === "function"
+    ? createTranslator
+    : require("./i18n.js").createTranslator;
+const _resolveLanguage =
+  typeof resolveLanguage === "function"
+    ? resolveLanguage
+    : require("./i18n.js").resolveLanguage;
+
 const DEFAULT_SETTINGS = {
   isolateDisplay: true,
   mathOnly: false,
@@ -18,6 +40,10 @@ const DEFAULT_SETTINGS = {
   // 裸公式智能识别
   bareLevel: 2,
   bareOnRibbon: true,
+  // 写回前的完整性校验（安全网）
+  integrityCheck: true,
+  // 界面语言：auto / zh / en
+  language: "auto",
 };
 
 /* ------------------------------------------------------------------ */
@@ -65,9 +91,10 @@ class LatexSuperConverterPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this._writing = new Set();
+    this.refreshTranslator();
 
     // 左栏功能区按钮
-    this.ribbonEl = this.addRibbonIcon("sigma", "转换 LaTeX（含裸公式智能识别）", async (evt) => {
+    this.ribbonEl = this.addRibbonIcon("sigma", this.t("ribbon.tooltip"), async (evt) => {
       await this.runPrimaryAction(evt);
     });
     this.ribbonEl.addClass("latex-super-converter-ribbon");
@@ -75,7 +102,7 @@ class LatexSuperConverterPlugin extends Plugin {
     // 命令：一键全处理（默认）
     this.addCommand({
       id: "convert-current-note",
-      name: "转换当前笔记（分隔符 + 裸公式）",
+      name: this.t("cmd.convertCurrent"),
       checkCallback: (checking) => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view) return false;
@@ -87,7 +114,7 @@ class LatexSuperConverterPlugin extends Plugin {
     // 命令：只处理 \( \) 与 \[ \]
     this.addCommand({
       id: "convert-delimiters-only",
-      name: "只转换 \\( \\) 与 \\[ \\] 分隔符",
+      name: this.t("cmd.delimitersOnly"),
       editorCheckCallback: (checking, editor) => {
         if (!checking) this.convertEditor(editor, { bareLevel: 0 });
         return true;
@@ -97,7 +124,7 @@ class LatexSuperConverterPlugin extends Plugin {
     // 命令：只补裸公式
     this.addCommand({
       id: "convert-bare-only",
-      name: "只智能识别裸公式并加定界符",
+      name: this.t("cmd.bareOnly"),
       editorCheckCallback: (checking, editor) => {
         if (!checking) this.convertEditor(editor, { delimiters: false });
         return true;
@@ -107,7 +134,7 @@ class LatexSuperConverterPlugin extends Plugin {
     // 命令：选中内容
     this.addCommand({
       id: "convert-selection",
-      name: "转换选中内容",
+      name: this.t("cmd.selection"),
       editorCheckCallback: (checking, editor) => {
         if (!editor.somethingSelected()) return false;
         if (!checking) this.convertSelection(editor);
@@ -118,7 +145,7 @@ class LatexSuperConverterPlugin extends Plugin {
     // 命令：整个仓库
     this.addCommand({
       id: "convert-whole-vault",
-      name: "转换整个仓库",
+      name: this.t("cmd.wholeVault"),
       callback: () => this.convertWholeVault(),
     });
 
@@ -128,7 +155,7 @@ class LatexSuperConverterPlugin extends Plugin {
         if (!editor.somethingSelected()) return;
         menu.addItem((item) =>
           item
-            .setTitle("转换选中内容的 LaTeX")
+            .setTitle(this.t("menu.convert"))
             .setIcon("sigma")
             .onClick(() => this.convertSelection(editor))
         );
@@ -159,6 +186,12 @@ class LatexSuperConverterPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  /** 语言变化时重建翻译函数（命令名需要重载插件才会更新，这里只影响新文案） */
+  refreshTranslator() {
+    this.lang = _resolveLanguage(this.settings.language);
+    this.t = _createTranslator(this.lang);
+  }
+
   /** 当前生效的转换参数 */
   pipelineOpts(override = {}) {
     return Object.assign(
@@ -170,6 +203,26 @@ class LatexSuperConverterPlugin extends Plugin {
       },
       override
     );
+  }
+
+  /**
+   * 安全网：写回前校验。
+   * @returns {null | Array} null 表示通过（或用户关闭了校验），否则返回 issue 列表
+   */
+  verify(source, output) {
+    if (!this.settings.integrityCheck) return null;
+    const result = _checkIntegrity(source, output);
+    return result.ok ? null : result.issues;
+  }
+
+  /** 校验失败时的提示（含一行技术摘要，方便用户反馈） */
+  reportBlocked(issues) {
+    new Notice(
+      this.t("notice.blocked", { issues: _summarizeIssues(issues) }),
+      12000
+    );
+    new Notice(this.t("notice.blockedHint"), 12000);
+    console.warn("[latex-super-converter] integrity check failed:", issues);
   }
 
   /** 左栏按钮点击行为 */
@@ -192,13 +245,13 @@ class LatexSuperConverterPlugin extends Plugin {
       await this.convertFile(file);
       return;
     }
-    new Notice("请先打开一篇 Markdown 笔记");
+    new Notice(this.t("notice.nothing"));
   }
 
   /** 转换当前视图（走编辑器，保留撤销栈） */
   async convertActiveView(view) {
     if (!view?.editor || !view.file) {
-      new Notice("当前笔记不可编辑");
+      new Notice(this.t("notice.nothing"));
       return;
     }
     this.convertEditor(view.editor, {});
@@ -211,9 +264,14 @@ class LatexSuperConverterPlugin extends Plugin {
     const result = convertAll(source, opts);
 
     if (result.output === source) {
-      if (this.settings.showNotice) {
-        new Notice(opts.bareLevel > 0 ? "没有发现可转换的 LaTeX" : "没有需要转换的分隔符");
-      }
+      if (this.settings.showNotice) new Notice(this.t("notice.nothing"));
+      return;
+    }
+
+    // 安全网：不通过就不写
+    const issues = this.verify(source, result.output);
+    if (issues) {
+      this.reportBlocked(issues);
       return;
     }
 
@@ -225,7 +283,7 @@ class LatexSuperConverterPlugin extends Plugin {
         ch: cursor.ch,
       });
     } catch (_) {}
-    if (this.settings.showNotice) new Notice(this.summary("已转换", result));
+    if (this.settings.showNotice) new Notice(this.summary("notice.prefix.done", result));
   }
 
   /** 只转换选中内容 */
@@ -236,32 +294,51 @@ class LatexSuperConverterPlugin extends Plugin {
     const result = convertAll(selected, this.pipelineOpts({}));
 
     if (result.output === selected) {
-      if (this.settings.showNotice) new Notice("选中内容无需转换");
+      if (this.settings.showNotice) new Notice(this.t("notice.nothing"));
       return;
     }
+
+    const issues = this.verify(selected, result.output);
+    if (issues) {
+      this.reportBlocked(issues);
+      return;
+    }
+
     editor.replaceRange(result.output, from, to);
-    if (this.settings.showNotice) new Notice(this.summary("已转换选中内容", result));
+    if (this.settings.showNotice) new Notice(this.summary("notice.prefix.selection", result));
   }
 
-  /** 统一结果文案 */
-  summary(prefix, r) {
+  /** 统一结果文案：数量部分走 i18n，前缀由调用方决定 */
+  summary(prefixKey, r) {
     const parts = [];
-    if (r.inlineCount || r.displayCount) {
-      parts.push(`分隔符 行内 ${r.inlineCount} / 行间 ${r.displayCount}`);
-    }
-    if (r.bareInline || r.bareDisplay) {
-      parts.push(`裸公式 行内 ${r.bareInline} / 行间 ${r.bareDisplay}`);
-    }
-    if (r.skipped) parts.push(`跳过 ${r.skipped}`);
-    return `${prefix}：${parts.join("，") || "无改动"}`;
+    parts.push(
+      this.t("notice.done", {
+        inline: r.inlineCount || 0,
+        block: r.displayCount || 0,
+        bare: (r.bareInline || 0) + (r.bareDisplay || 0),
+      })
+    );
+    if (r.skipped) parts.push(this.t("notice.skipped", { skipped: r.skipped }));
+    const body = parts.join(" · ");
+    if (!prefixKey) return body;
+    return `${this.t(prefixKey)}${this.t("notice.sep")}${body}`;
   }
 
-  /** 转换磁盘上的单个文件 */
+  /**
+   * 转换磁盘上的单个文件。
+   * @returns {{changed: boolean, blocked?: boolean, issues?: Array}}
+   */
   async convertFile(file, opts = {}) {
     if (!file || file.extension !== "md") return { changed: false };
     const source = await this.app.vault.read(file);
     const result = convertAll(source, this.pipelineOpts({}));
     if (result.output === source) return { changed: false };
+
+    const issues = this.verify(source, result.output);
+    if (issues) {
+      if (!opts.silent) this.reportBlocked(issues);
+      return { changed: false, blocked: true, issues };
+    }
 
     this._writing.add(file.path);
     try {
@@ -270,7 +347,7 @@ class LatexSuperConverterPlugin extends Plugin {
       setTimeout(() => this._writing.delete(file.path), 0);
     }
     if (!opts.silent && this.settings.showNotice) {
-      new Notice(this.summary(file.basename, result));
+      new Notice(`${file.basename}: ${this.summary(null, result)}`);
     }
     return Object.assign({ changed: true }, result);
   }
@@ -278,7 +355,7 @@ class LatexSuperConverterPlugin extends Plugin {
   /** 整个仓库批量转换 */
   async convertWholeVault() {
     if (this._busy) {
-      new Notice("正在转换，请稍候…");
+      new Notice(this.t("notice.busy"));
       return;
     }
     this._busy = true;
@@ -289,22 +366,28 @@ class LatexSuperConverterPlugin extends Plugin {
     let display = 0;
     let bareInline = 0;
     let bareDisplay = 0;
+    const blocked = [];
 
     const active = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (active?.editor && active.file) {
       const before = active.editor.getValue();
       const r = convertAll(before, this.pipelineOpts({}));
       if (r.output !== before) {
-        active.editor.setValue(r.output);
-        fileCount++;
-        inline += r.inlineCount;
-        display += r.displayCount;
-        bareInline += r.bareInline;
-        bareDisplay += r.bareDisplay;
+        const issues = this.verify(before, r.output);
+        if (issues) {
+          blocked.push(active.file.basename);
+        } else {
+          active.editor.setValue(r.output);
+          fileCount++;
+          inline += r.inlineCount;
+          display += r.displayCount;
+          bareInline += r.bareInline;
+          bareDisplay += r.bareDisplay;
+        }
       }
     }
 
-    const notice = new Notice(`正在转换 0/${files.length} …`, 0);
+    const notice = new Notice(`${fileCount}/${files.length} …`, 0);
     try {
       for (let idx = 0; idx < files.length; idx++) {
         const file = files[idx];
@@ -317,12 +400,14 @@ class LatexSuperConverterPlugin extends Plugin {
             display += r.displayCount || 0;
             bareInline += r.bareInline || 0;
             bareDisplay += r.bareDisplay || 0;
+          } else if (r.blocked) {
+            blocked.push(file.basename);
           }
         } catch (err) {
           console.error("[latex-super-converter]", file.path, err);
         }
         if (idx % 10 === 0) {
-          notice.setMessage(`正在转换 ${idx + 1}/${files.length} …`);
+          notice.setMessage(`${idx + 1}/${files.length} …`);
           await new Promise((res) => setTimeout(res, 0));
         }
       }
@@ -331,9 +416,16 @@ class LatexSuperConverterPlugin extends Plugin {
       this._busy = false;
     }
 
-    new Notice(
-      `完成：修改 ${fileCount} 篇，分隔符 ${inline + display} 处，裸公式 ${bareInline + bareDisplay} 处`
-    );
+    new Notice(this.t("notice.vaultDone", { files: fileCount }));
+    if (blocked.length) {
+      new Notice(
+        this.t("notice.vaultBlocked", {
+          files: blocked.length,
+          list: blocked.slice(0, 5).join(", ") + (blocked.length > 5 ? " …" : ""),
+        }),
+        15000
+      );
+    }
   }
 }
 
@@ -349,22 +441,41 @@ class LatexSuperConverterSettingTab extends PluginSettingTab {
 
   display() {
     const { containerEl } = this;
+    const t = this.plugin.t;
     containerEl.empty();
 
-    /* ---------- 裸公式智能识别 ---------- */
-    new Setting(containerEl).setName("裸公式识别").setHeading();
+    /* ---------- 语言（放最上面，方便英文用户立刻切换） ---------- */
+    new Setting(containerEl).setName(t("settings.heading.language")).setHeading();
 
     new Setting(containerEl)
-      .setName("识别强度")
-      .setDesc(
-        "有些 AI 输出的公式完全没有定界符（如 |H| \\mid |G|、n_p(G) \\equiv 1 \\pmod p）。下拉选择识别松紧。"
-      )
+      .setName(t("settings.language.name"))
+      .setDesc(t("settings.language.desc"))
       .addDropdown((d) =>
         d
-          .addOption("0", "关闭（只处理 \\( \\) 和 \\[ \\]）")
-          .addOption("1", "保守：只认 LaTeX 命令与 |…|")
-          .addOption("2", "标准：再加 x^2、n_p、f(x)、24 = 2^3")
-          .addOption("3", "激进：再加夹在中文间的单字母变量")
+          .addOption("auto", t("settings.language.auto"))
+          .addOption("zh", t("settings.language.zh"))
+          .addOption("en", t("settings.language.en"))
+          .setValue(this.plugin.settings.language || "auto")
+          .onChange(async (v) => {
+            this.plugin.settings.language = v;
+            await this.plugin.saveSettings();
+            this.plugin.refreshTranslator();
+            this.display();
+          })
+      );
+
+    /* ---------- 裸公式智能识别 ---------- */
+    new Setting(containerEl).setName(t("settings.heading.behavior")).setHeading();
+
+    new Setting(containerEl)
+      .setName(t("settings.bareLevel.name"))
+      .setDesc(t("settings.bareLevel.desc"))
+      .addDropdown((d) =>
+        d
+          .addOption("0", t("settings.bareLevel.off"))
+          .addOption("1", t("settings.bareLevel.safe"))
+          .addOption("2", t("settings.bareLevel.standard"))
+          .addOption("3", t("settings.bareLevel.aggressive"))
           .setValue(String(this.plugin.settings.bareLevel))
           .onChange(async (v) => {
             this.plugin.settings.bareLevel = Number(v) || 0;
@@ -373,78 +484,62 @@ class LatexSuperConverterSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("左栏按钮启用裸公式识别")
-      .setDesc("关闭后按钮只做 \\( \\) / \\[ \\] 转换，裸公式识别仅通过命令面板调用。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.bareOnRibbon).onChange(async (v) => {
+      .setName(t("settings.bareOnRibbon.name"))
+      .setDesc(t("settings.bareOnRibbon.desc"))
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.bareOnRibbon).onChange(async (v) => {
           this.plugin.settings.bareOnRibbon = v;
           await this.plugin.saveSettings();
         })
       );
 
     /* ---------- 分隔符转换 ---------- */
-    new Setting(containerEl).setName("分隔符转换").setHeading();
-
     new Setting(containerEl)
-      .setName("行间公式块独占行")
-      .setDesc("把 $$…$$ 与前后文字拆到不同行。实时预览对独立成块的 $$ 渲染更稳。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.isolateDisplay).onChange(async (v) => {
+      .setName(t("settings.isolateDisplay.name"))
+      .setDesc(t("settings.isolateDisplay.desc"))
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.isolateDisplay).onChange(async (v) => {
           this.plugin.settings.isolateDisplay = v;
           await this.plugin.saveSettings();
         })
       );
 
     new Setting(containerEl)
-      .setName("只转换看起来像公式的内容（实验性）")
-      .setDesc(
-        "默认关闭，即无条件转换所有 \\( \\) 与 \\[ \\]。开启后会跳过明显不是数学的片段（如 \\[x for x in ...\\]）。"
-      )
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.mathOnly).onChange(async (v) => {
-          this.plugin.settings.mathOnly = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    /* ---------- 行为 ---------- */
-    new Setting(containerEl).setName("行为").setHeading();
-
-    new Setting(containerEl)
-      .setName("左栏按钮转换整个仓库")
-      .setDesc("关闭时按钮只转换当前笔记；按住 Alt 点击可临时反转。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.convertWholeVaultOnClick).onChange(async (v) => {
-          this.plugin.settings.convertWholeVaultOnClick = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("显示转换结果提示")
-      .setDesc("每次转换后用 Notice 显示处理数量。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.showNotice).onChange(async (v) => {
-          this.plugin.settings.showNotice = v;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("保存时自动转换")
-      .setDesc("笔记保存后自动扫描并转换（含裸公式识别，会改动手写文件，谨慎开启）。")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.convertOnSave).onChange(async (v) => {
+      .setName(t("settings.convertOnSave.name"))
+      .setDesc(t("settings.convertOnSave.desc"))
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.convertOnSave).onChange(async (v) => {
           this.plugin.settings.convertOnSave = v;
           await this.plugin.saveSettings();
         })
       );
 
-    new Setting(containerEl).setName("说明").setDesc(
-      "代码块、行内代码、YAML frontmatter、HTML 注释、wikilink 与已有 $ / $$ 公式都会跳过；" +
-        "未配对的分隔符保持原样；Markdown 表格、加粗、链接一律保留；" +
-        "裸公式识别只包裹带明确数学证据的片段，普通中英文正文不动。"
-    );
+    new Setting(containerEl)
+      .setName(t("settings.showNotice.name"))
+      .setDesc(t("settings.showNotice.desc"))
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.showNotice).onChange(async (v) => {
+          this.plugin.settings.showNotice = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    /* ---------- 安全检查 ---------- */
+    new Setting(containerEl).setName(t("settings.heading.safety")).setHeading();
+
+    new Setting(containerEl)
+      .setName(t("settings.integrity.name"))
+      .setDesc(t("settings.integrity.desc"))
+      .addToggle((tg) =>
+        tg.setValue(this.plugin.settings.integrityCheck).onChange(async (v) => {
+          this.plugin.settings.integrityCheck = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    // 说明段落：用普通 <p>，不要拿长句子当小标题（Obsidian 规范里 setHeading 只用于章节名）
+    const about = containerEl.createEl("p", { text: t("settings.about") });
+    about.addClass("setting-item-description");
   }
 }
 
