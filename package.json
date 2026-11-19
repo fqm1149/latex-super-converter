@@ -1,6 +1,6 @@
 {
   "name": "latex-super-converter",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Convert and repair LaTeX delimiters, auto-detect bare formulas, and preserve Markdown structure.",
   "main": "main.js",
   "scripts": {

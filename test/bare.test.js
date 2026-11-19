@@ -364,4 +364,105 @@ eq(
   }
 }
 
+/* ---------------- 11. 上下标挂在闭括号 / 戴帽命令 / 对称定界符 ---------------- */
+
+// 11.1 闭括号吸收后缀上下标：(...)^n 不能被切成 "$(...)$^$n"
+eq(
+  c("满足 \\sigma^2 = \\tau^3 = (\\sigma\\tau)^4 = e 即可"),
+  "满足 $\\sigma^2 = \\tau^3 = (\\sigma\\tau)^4 = e$ 即可",
+  "close paren absorbs exponent"
+);
+eq(
+  c("因为 \\sigma^2 = (12)^2 = e，所以"),
+  "因为 $\\sigma^2 = (12)^2 = e$，所以",
+  "numeric paren absorbs exponent"
+);
+eq(c("即 [0,1]^{-1} 的像"), "即 $[0,1]^{-1}$ 的像", "close bracket absorbs exponent");
+eq(c("故 (a+b)_i 为零"), "故 $(a+b)_i$ 为零", "close paren absorbs subscript");
+
+// 11.2 戴帽命令吃自己的参数，后缀上下标仍能挂上
+eq(
+  c("由 (\\bar{a}\\bar{b})^2 = \\bar{e} 得 \\bar{b}\\bar{a} = \\bar{a}\\bar{b}^2。"),
+  "由 $(\\bar{a}\\bar{b})^2 = \\bar{e}$ 得 $\\bar{b}\\bar{a} = \\bar{a}\\bar{b}^2$。",
+  "accent command absorbs its argument"
+);
+eq(c("写作 \\bar{a}^i \\bar{b}^j 即可"), "写作 $\\bar{a}^i \\bar{b}^j$ 即可", "accent with script");
+eq(c("区间 \\overline{AB} 与 \\widehat{PQ}"), "区间 $\\overline{AB}$ 与 $\\widehat{PQ}$", "overline/widetilde");
+
+// 11.3 \vert / \Vert 是对称定界符，不能判成闭括号
+eq(c("因为 \\vert{}P\\vert{} \\ge 24 成立"), "因为 $\\vert{}P\\vert{} \\ge 24$ 成立", "vert with empty groups");
+eq(c("因为 \\vert P \\vert \\ge 24 成立"), "因为 $\\vert P \\vert \\ge 24$ 成立", "vert with spaces");
+eq(c("求 \\vert{}N\\vert{} \\cdot \\vert{}P/N\\vert{} 的值"), "求 $\\vert{}N\\vert{} \\cdot \\vert{}P/N\\vert{}$ 的值", "vert products");
+eq(c("范数 \\Vert x \\Vert 有限"), "范数 $\\Vert x \\Vert$ 有限", "Vert norm");
+
+// 11.4 运算符夹住的普通单词（"= baba ="）仍算公式
+eq(
+  c("- bxb^{-1} = b(abab)b^{-1} = baba = y \\in N，且"),
+  "- $bxb^{-1} = b(abab)b^{-1} = baba = y \\in N$，且",
+  "word sandwiched by operators"
+);
+// 但不能吞掉真正的英文
+eq(c("若 x = abc 则结束"), "若 x = abc 则结束", "word followed by CJK stays out");
+eq(c("结果为 = the value 的部分"), "结果为 = the value 的部分", "english prose after = stays out");
+
+// 11.5 补充的关系符号
+eq(c("证 N \\trianglelefteq P 即可"), "证 $N \\trianglelefteq P$ 即可", "trianglelefteq");
+eq(c("由 n_p \\leqq m 得"), "由 $n_p \\leqq m$ 得", "leqq");
+eq(c("且 A \\Subset B 成立"), "且 $A \\Subset B$ 成立", "Subset");
+
+/* ---------------- 12. 标题里的公式 ---------------- */
+
+eq(
+  c("### 实战：证明 S_4 \\cong P = \\langle a, b \\mid a^2=b^3=(ab)^4=e \\rangle"),
+  "### 实战：证明 $S_4 \\cong P = \\langle a, b \\mid a^2=b^3=(ab)^4=e \\rangle$",
+  "heading with latex command is converted"
+);
+// 纯编号/普通标题仍然不动（避免把 "# 1.2 版本" 当公式）
+eq(c("# 1.2 版本 p^a"), "# 1.2 版本 p^a", "numeric heading untouched");
+eq(c("## 第 2 节 p-群"), "## 第 2 节 p-群", "navigation heading untouched");
+
+/* ---------------- 13. 群呈示证明全文回归 ---------------- */
+
+{
+  const file = path.join(__dirname, "fixtures", "group-presentation.md");
+  if (fs.existsSync(file)) {
+    const src = fs.readFileSync(file, "utf8");
+    const once = c(src);
+    const before = src.split("\n");
+    const after = once.split("\n");
+
+    assert.strictEqual(after.length, before.length, "line count changed on group-presentation.md");
+    pass++;
+
+    const dollars = (s) => (s.match(/(?<!\\)\$/g) || []).length;
+    for (let i = 0; i < after.length; i++) {
+      assert.strictEqual(dollars(after[i]) % 2, 0, `unbalanced $ on line ${i + 1}`);
+      pass++;
+    }
+
+    assert.strictEqual(c(once), once, "group-presentation.md not idempotent");
+    pass++;
+
+    // 竖线（表格）与加粗必须守恒
+    const pipes = (s) => (s.match(/(?<!\\)\|/g) || []).length;
+    for (let i = 0; i < before.length; i++) {
+      assert.strictEqual(pipes(after[i]), pipes(before[i]), `pipes changed on line ${i + 1}`);
+      assert.strictEqual(
+        (after[i].match(/\*\*/g) || []).length,
+        (before[i].match(/\*\*/g) || []).length,
+        `bold changed on line ${i + 1}`
+      );
+      pass += 2;
+    }
+
+    // 挖掉 $…$ 之后不允许还剩 LaTeX 命令
+    const leftover = after.filter((line) => {
+      const stripped = line.replace(/\$\$[\s\S]*?\$\$/g, "").replace(/\$[^$\n]*\$/g, "");
+      return /\\[A-Za-z]+/.test(stripped);
+    });
+    assert.deepStrictEqual(leftover, [], "unconverted latex left: " + leftover.join(" | "));
+    pass++;
+  }
+}
+
 console.log(`✅ ${pass} bare-formula tests passed`);

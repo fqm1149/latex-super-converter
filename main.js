@@ -593,6 +593,22 @@ const KNOWN_CMDS = new Set(
    lbrace rbrace lbrack rbrack langle rangle lvert rvert Vert parallel
    hookrightarrow twoheadrightarrow rightleftharpoons iff colon approx ncong
    bigcup bigcap bigsqcup sqcup sqcap uplus sqsubset sqsubseteq sqsupset sqsupseteq
+   trianglelefteq trianglerighteq vartrianglelefteq vartrianglerighteq
+   leqq geqq lneq gneq lneqq gneqq lvertneqq gvertneqq leqslant geqslant
+   nleq ngeq nless ngtr nleqslant ngeqslant nleqq ngeqq
+   lesssim gtrsim lessapprox gtrapprox lessgtr gtrless lesseqgtr gtreqless
+   precsim succsim precapprox succapprox nprec nsucc precnsim succnsim
+   subsetneqq supsetneqq Subset Supset
+   rightrightarrows leftleftarrows rightleftarrows leftrightarrows
+   uparrow downarrow updownarrow Uparrow Downarrow Updownarrow
+   nearrow searrow swarrow nwarrow hookleftarrow twoheadleftarrow
+   rightharpoonup rightharpoondown leftharpoonup leftharpoondown
+   rightleftharpoonup rightleftharpoondown leftrightharpoons
+   vDash Vdash Vvdash nvdash nvDash models vdash dashv
+   doteq approxeq risingdotseq fallingdotseq eqcirc circeq triangleq
+   bumpeq Bumpeq square Box Diamond blacksquare checkmark
+   ltimes rtimes smallsetminus amalg wr diamond
+   sgn tr rank diag span codim coker Det Tr arg deg
    mathrel mathbin mathord mathopen mathclose mathpunct
    colon dagger ddagger dag S P copyright pounds
    begin end`
@@ -692,6 +708,28 @@ const MULTI_ARG_CMDS = new Set([
 
 /** 带可选 [..] 参数的命令：\sqrt[3]{x} */
 const OPT_ARG_CMDS = new Set(["sqrt", "genfrac"]);
+
+/**
+ * 只吃「一个」{…} 参数的命令。
+ * 戴帽类命令（\bar{a} \hat{x} \overline{AB} …）后面常接上下标，
+ * 例如 \bar{a}^i、\underbrace{…}_{k}。若 {…} 落成独立括号，
+ * 后缀的 ^ / _ 就没有宿主，会被切成两段。
+ */
+const ONE_ARG_CMDS = new Set([
+  "bar", "hat", "tilde", "vec", "dot", "ddot", "dddot", "ddddot",
+  "acute", "grave", "breve", "check", "mathring",
+  "widehat", "widetilde", "widecheck",
+  "overline", "underline", "overbrace", "underbrace",
+  "overrightarrow", "overleftarrow", "overleftrightarrow",
+  "underrightarrow", "underleftarrow",
+]);
+
+/**
+ * 对称定界符命令：\vert 和 \Vert 既可能是左、也可能是右，静态无法判断。
+ * 直接当作 pipe 处理 —— grow() 里「栈顶是 | 就弹出，否则压入」正好适用。
+ * 这也兼容 AI 常见的 \vert{}P\vert{} 写法（花括号只是防表格冲突的占位）。
+ */
+const BAR_CMDS = new Set(["vert", "Vert"]);
 
 /* ------------------------------------------------------------------ */
 /* 分词                                                                */
@@ -926,6 +964,9 @@ function tokenize(line, opts = {}) {
             if (ge < 0) break;
             end = ge;
           }
+        } else if (ONE_ARG_CMDS.has(name) && line[end] === "{") {
+          const ge = readGroup(line, end);
+          if (ge > 0) end = ge;
         } else if (TEXT_CMDS.has(name) && line[end] === "{") {
           const ge = readGroup(line, end);
           if (ge > 0) end = ge;
@@ -934,7 +975,9 @@ function tokenize(line, opts = {}) {
         // 2) \left[ / \right( 这类：命令与紧随其后的定界符是同一条 token
         let kind = KNOWN_CMDS.has(name) ? "cmd" : "cmdx";
         let canon = null;
-        if (name === "left" || name === "right") {
+        if (BAR_CMDS.has(name)) {
+          kind = "pipe";
+        } else if (name === "left" || name === "right") {
           const rest = line.slice(end);
           const dm = /^(\\(?:[A-Za-z]+)|\\.|[()[\]{}|./])/.exec(rest);
           if (dm) {
@@ -1056,8 +1099,11 @@ function tokenize(line, opts = {}) {
       continue;
     }
     if (")]}".includes(c)) {
-      push("close", i, i + 1);
-      i++;
+      // (...)^2 / ]^{-1} / \}^{\infty}：指数与下标挂在闭括号上，不能落成孤立的 ^
+      const csc = readScripts(line, i + 1);
+      // canon 必须显式给：text 现在含尾部上下标（")^2"），不能再当配对键用
+      push("close", i, csc.end, { canon: c, hasScript: csc.hasScript });
+      i = csc.end;
       continue;
     }
 
@@ -1287,7 +1333,7 @@ function grow(toks, i, level) {
       if (n < 0) break;
       const nt = toks[n];
       const insideParen = stack.length > 0;
-      const ok =
+      let ok =
         nt.t === "cmd" || nt.t === "cmdx" || nt.t === "esc" || nt.t === "pipe" ||
         nt.t === "sop" || nt.t === "wop" || nt.t === "open" || nt.t === "amp" ||
         nt.t === "envopen" ||
@@ -1296,7 +1342,39 @@ function grow(toks, i, level) {
         (nt.t === "num" &&
           (nt.hasScript || insideParen || followedByStrongOp(toks, n) || precededByMathOp(toks, n))) ||
         (nt.t === "close" && insideParen);
+
+      /*
+       * "= baba =" 这类：运算符后面跟一个普通单词（无上下标、≤8 字母），
+       * 但该单词后面又紧接数学 token 时，说明它还在公式里。
+       * 用「前后都是数学」双向夹逼，避免把 "= the value" 里的英文吞进来。
+       */
+      let sandwichWord = false;
+      if (!ok && nt.t === "word" && !nt.hasScript && nt.word.length <= 8) {
+        const before = prevNonSpace(toks, j);
+        const beforeTok = before >= 0 ? toks[before] : null;
+        if (beforeTok && beforeTok.t === "sop") {
+          const after = nextNonSpace(toks, n);
+          const afterTok = after >= 0 ? toks[after] : null;
+          if (
+            !afterTok ||
+            afterTok.t === "sop" || afterTok.t === "cmd" || afterTok.t === "cmdx" ||
+            afterTok.t === "pipe" || afterTok.t === "close" || afterTok.t === "wop"
+          ) {
+            ok = true;
+            sandwichWord = true;
+          }
+        }
+      }
+
       if (!ok) break;
+
+      // 该单词本身不是 isMathTok（例如 4 个字母的 baba），必须在这里一并消费，
+      // 否则下一轮会在单词处 break，区间又被切断。
+      if (sandwichWord) {
+        right = n;
+        j = n + 1;
+        continue;
+      }
       j = n;
       continue;
     }
@@ -1637,7 +1715,9 @@ function convertBareFormulas(input, opts = {}) {
       out.push(line);
       continue;
     }
-    if (skipHeadings && /^\s{0,3}#{1,6}\s/.test(line)) {
+    // 标题默认不动（避免把 "# 1.2 版本" 这类编号误判成公式），
+    // 但如果标题里出现了 LaTeX 命令，那显然是真公式，照常处理。
+    if (skipHeadings && /^\s{0,3}#{1,6}\s/.test(line) && !/\\[A-Za-z]+/.test(line)) {
       out.push(line);
       continue;
     }

@@ -106,6 +106,10 @@ cd latex-super-converter
 | `\frac{x^2 - y^2}{(x^2 + y^2)^2}` | `$\frac{x^2 - y^2}{(x^2 + y^2)^2}$` |
 | `\begin{cases} 1, & x > 0 \\ -1, & x < 0 \end{cases}` | `$\begin{cases} 1, & x > 0 \\ -1, & x < 0 \end{cases}$`（`&` 与 `\\` 不断开） |
 | `D = [a, b] \times [c, +\infty)` | `$D = [a, b] \times [c, +\infty)$`（半开区间） |
+| `(\sigma\tau)^4 = e` | `$(\sigma\tau)^4 = e$`（上下标挂在闭括号上） |
+| `\vert{}P\vert{} \ge 24` | `$\vert{}P\vert{} \ge 24$`（对称定界符） |
+| `\bar{a}^i \bar{b}^j` | `$\bar{a}^i \bar{b}^j$`（戴帽命令 + 上下标） |
+| `N \trianglelefteq P` | `$N \trianglelefteq P$`（AMS 关系符） |
 
 ### 不会误伤的内容
 
@@ -241,16 +245,20 @@ $$
 
 ```bash
 node test/converter.test.js   # 38 个分隔符用例
-node test/bare.test.js        # 630 个裸公式用例（含 Markdown 结构保护、example/example2 回归）
+node test/bare.test.js        # 974 个裸公式用例（含 Markdown 结构保护与三份真实笔记回归）
 node test/integrity.test.js   # 22 个完整性校验用例（历史事故形态 + 防误报）
-node test/pipeline.test.js    # 1196 个端到端用例（真实仓库 21 篇笔记审计）
+node test/pipeline.test.js    # 端到端用例（真实仓库逐篇审计）
 node test/plugin.test.js      # mock obsidian 加载 main.js 冒烟 + 拦截 + 语言切换
 node scripts/build.js         # 生成 main.js
 npm test                      # 以上全部
 ```
 
-回归样本放在 `test/fixtures/`，`example2.md` 覆盖了 `\{ \}` 上下标链、`\left[ \right]` 混搭定界符、
-`\frac` 嵌套参数、`cases` 环境内的 `&` / `\\`、半开区间 `[c, +\infty)` 这类曾经断裂的写法。
+回归样本放在 `test/fixtures/`：
+
+- `example2.md` —— `\{ \}` 上下标链、`\left[ \right]` 混搭定界符、`\frac` 嵌套参数、`cases` 环境内的 `&` / `\\`
+- `group-presentation.md` —— 闭括号上的指数（`(\sigma\tau)^4`）、`\vert{}P\vert{}`、`\bar{a}^i`、`\trianglelefteq`、含公式的标题
+
+两份样本都会检查：行数不变、`$` 成对、表格竖线不变、加粗不变、幂等、无残留 LaTeX 命令。
 
 `main.js` 由 `scripts/build.js` 拼接 `src/converter.js` + `src/bare.js` + `src/integrity.js` + `src/i18n.js` + `src/plugin.js` 生成，零依赖，不需要 `npm install`。
 
@@ -273,7 +281,8 @@ latex-super-converter/
 │   ├── integrity.test.js
 │   ├── pipeline.test.js
 │   ├── plugin.test.js
-│   └── fixtures/         # 回归样本（example2.md 等）
-│       └── example2.md
+│   └── fixtures/         # 回归样本
+│       ├── example2.md
+│       └── group-presentation.md
 └── install.sh
 ```
